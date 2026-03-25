@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react"
 import { type ThreeElements } from "@react-three/fiber"
-import type { Collider, ConvexHull, MotionGroupDescription } from "@wandelbots/nova-js/v2"
+import { type Collider, type ConvexHull, type DHParameter, type MotionGroupDescription } from "@wandelbots/nova-js/v2"
 import type { Geometry, SafetySetupSafetyZone } from "@wandelbots/nova-js/v1"
 import * as THREE from "three"
 import { ConvexGeometry } from "three-stdlib"
@@ -8,6 +8,7 @@ import type { Vector3 } from "three"
 
 export type SafetyZonesRendererProps = {
   safetyZones: SafetySetupSafetyZone[] | MotionGroupDescription["safety_zones"]
+  dhParameters?: DHParameter[]
 } & ThreeElements["group"]
 
 interface CoplanarityResult {
@@ -47,6 +48,7 @@ function areVerticesCoplanar(vertices: THREE.Vector3[]): CoplanarityResult {
 
 export function SafetyZonesRenderer({
                                       safetyZones,
+                                      dhParameters,
                                       ...props
                                     }: SafetyZonesRendererProps) {
 
@@ -62,7 +64,7 @@ export function SafetyZonesRenderer({
    * @param vertices Vector3[]
    * @param id number
    */
-  const renderMesh = (vertices: Vector3[], id: number) => {
+  const renderHullMesh = (vertices: Vector3[], id: number) => {
     // Check if the vertices are on the same plane and only define a plane
     // Algorithm has troubles with vertices that are on the same plane so we
     // add a new vertex slightly moved along the normal direction
@@ -104,20 +106,90 @@ export function SafetyZonesRenderer({
   }
 
   /**
+   * Plane size is calculated based on the reach radius of the robot
+   */
+  const planeSize = useMemo(() => {
+    const defaultPlaneSize = 5
+    if (!dhParameters || dhParameters.length === 0) {
+      return defaultPlaneSize
+    }
+    const reachRadiusM = dhParameters.reduce((sum, p) => {
+      return sum + (Math.abs(p.a ?? 0) / 1000) + (Math.abs(p.d ?? 0) / 1000)
+    }, 0)
+    const size = reachRadiusM * 2
+    if (!Number.isFinite(size) || size <= 0) {
+      return defaultPlaneSize
+    }
+    return size
+  }, [dhParameters])
+
+  /**
+   * Helper function to render plane meshes
+   *
+   * @param position THREE.Vector3 - The transform origin. This is the point on the plane defined in the Nova V2 API.
+   *                                  In this visualization, we center the (theoretically infinite) plane on this point.
+   *                                  This point also acts as the pivot around which the rotation is applied.
+   * @param orientationVector THREE.Vector3 - A rotation vector (Rodrigues notation).
+   *                                          - Direction: The axis around which the plane is rotated.
+   *                                          - Length: The angle of rotation in radians.
+   * @param id number
+   */
+  const renderPlaneMesh = (position: THREE.Vector3, orientationVector: THREE.Vector3, id: number) => {
+    // The orientation is provided as a rotation vector (also known as Rodrigues notation or axis-angle representation).
+    // 1. The direction of the vector defines the axis of rotation in 3D space.
+    // 2. The magnitude (length) of the vector represents the rotation angle in radians.
+    // The rotation is applied to the default THREE.PlaneGeometry (which starts in the XY plane with normal along +Z).
+    const angle = orientationVector.length()
+
+    const quaternion = new THREE.Quaternion()
+    if (angle > 1e-6) {
+      const axis = orientationVector.clone().normalize()
+      quaternion.setFromAxisAngle(axis, angle)
+    }
+
+    return (
+      <mesh
+        key={`safety-zone-plane-${id}`}
+        renderOrder={id}
+        position={position}
+        quaternion={quaternion}
+      >
+        <planeGeometry args={[planeSize, planeSize]} />
+        <meshStandardMaterial
+          key={`safety-zone-plane-material-${id}`}
+          attach="material"
+          color="#009f4d"
+          opacity={0.2}
+          depthTest={false}
+          depthWrite={false}
+          transparent
+          side={THREE.DoubleSide}
+          polygonOffset
+          polygonOffsetFactor={-id}
+        />
+      </mesh>
+    )
+  }
+
+  /**
    * Helper function to render V2 safety zones
    */
   const renderV2SafetyZones = () => {
     return Object.values(safetyZones ?? {}).map((zone: Collider, index: number) => {
-      let hullVertices: number[][] = []
+      switch (zone.shape.shape_type) {
+        case "convex_hull":
+          return renderHullMesh(
+            (zone.shape as ConvexHull).vertices
+              .map((vertex: number[]) => new THREE.Vector3(vertex[0] / 1000, vertex[1] / 1000, vertex[2] / 1000)), index,
+          )
 
-      if (Object.keys(zone.shape).includes("vertices")) {
-        hullVertices = (zone.shape as ConvexHull).vertices
+        case "plane":
+          return zone?.pose?.position && zone?.pose?.orientation && renderPlaneMesh(
+            new THREE.Vector3(zone.pose.position[0] / 1000, zone.pose.position[1] / 1000, zone.pose.position[2] / 1000),
+            new THREE.Vector3(zone.pose.orientation[0], zone.pose.orientation[1], zone.pose.orientation[2]),
+            index,
+          )
       }
-
-      const vertices = hullVertices
-        .map((vertex: number[]) => new THREE.Vector3(vertex[0] / 1000, vertex[1] / 1000, vertex[2] / 1000))
-
-      return renderMesh(vertices, index)
     })
   }
 
@@ -146,7 +218,7 @@ export function SafetyZonesRenderer({
           )
 
           // Use a per-geometry identifier derived from both zone index and geometry index
-          return renderMesh(vertices, index * 1000 + i)
+          return renderHullMesh(vertices, index * 1000 + i)
         })
       })
     }
