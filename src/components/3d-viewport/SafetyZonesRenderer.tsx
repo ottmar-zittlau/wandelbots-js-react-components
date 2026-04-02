@@ -195,20 +195,47 @@ export function SafetyZonesRenderer({
         return geometries.map((geometry, i) => {
           if (!geometry.convex_hull) return null
 
-          // Use a per-geometry identifier derived from both zone index and geometry index
-          const id = index * 1000 + i
-          // Build a compatible zone object for renderMesh
-          const zone: Collider = {
-            pose: {
-              position: [0, 0, 0],
-              orientation: [0, 0, 0],
-            },
-            shape: {
-              shape_type: "convex_hull",
-              vertices: geometry.convex_hull.vertices.map((v) => [v.x, v.y, v.z]),
-            } as ConvexHull,
+          const vertices = geometry.convex_hull.vertices.map(
+            (v) => new THREE.Vector3(v.x / 1000, v.y / 1000, v.z / 1000),
+          )
+
+          // Check if the vertices are on the same plane and only define a plane
+          // Algorithm has troubles with vertices that are on the same plane so we
+          // add a new vertex slightly moved along the normal direction
+          const coplanarityResult = verticesToCoplanarity(vertices)
+
+          if (coplanarityResult.isCoplanar && coplanarityResult.normal) {
+            // Add a new vertex slightly moved along the normal direction
+            const offset = 0.0001
+            const newVertex = new THREE.Vector3().addVectors(
+              vertices[0],
+              coplanarityResult.normal.multiplyScalar(offset),
+            )
+            vertices.push(newVertex)
           }
-          return renderMesh(id, zone)
+
+          let convexGeometry
+          try {
+            convexGeometry = new ConvexGeometry(vertices)
+          } catch (error) {
+            console.log("Error creating ConvexGeometry:", error)
+            return null
+          }
+          return (
+            <mesh key={`${index}-${i}`} geometry={convexGeometry}>
+              <meshStandardMaterial
+                key={index}
+                attach="material"
+                color="#009f4d"
+                opacity={0.2}
+                depthTest={false}
+                depthWrite={false}
+                transparent
+                polygonOffset
+                polygonOffsetFactor={-i}
+              />
+            </mesh>
+          )
         })
       })
     }
